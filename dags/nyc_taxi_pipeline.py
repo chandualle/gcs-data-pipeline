@@ -1,3 +1,4 @@
+
 cat > dags/nyc_taxi_pipeline.py <<'PY'
 import os
 import tempfile
@@ -164,9 +165,7 @@ def transform_and_upload():
         duplicate_rows = int(df.duplicated().sum())
         df = df.drop_duplicates().copy()
 
-        df["pickup_date"] = (
-            df["tpep_pickup_datetime"].dt.date
-        )
+        df["pickup_date"] = df["tpep_pickup_datetime"].dt.date
 
         df["trip_duration_minutes"] = (
             df["tpep_dropoff_datetime"]
@@ -191,7 +190,6 @@ def transform_and_upload():
 
         print(f"Transformation report: {report}")
 
-        # Return a small value for the downstream verification task.
         return int(len(df))
 
 
@@ -239,6 +237,33 @@ def verify_bigquery_count(**context):
     print(f"Verified {loaded_rows} rows in BigQuery.")
 
 
+def check_bigquery_quality():
+    """Check that the table is populated and has no negative fares."""
+    client = bigquery.Client(project=PROJECT_ID)
+
+    query = f"""
+        SELECT
+            COUNT(*) AS total_rows,
+            COUNTIF(fare_amount < 0) AS negative_fares
+        FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
+    """
+
+    result = list(client.query(query).result())[0]
+
+    if result.total_rows == 0:
+        raise ValueError("BigQuery table is empty")
+
+    if result.negative_fares > 0:
+        raise ValueError(
+            f"Found {result.negative_fares} negative fares"
+        )
+
+    print(
+        "Quality check passed: "
+        f"{result.total_rows} rows, no negative fares."
+    )
+
+
 with DAG(
     dag_id="nyc_taxi_pipeline",
     description="Extract, validate, transform, and load NYC taxi data",
@@ -278,11 +303,17 @@ with DAG(
         python_callable=verify_bigquery_count,
     )
 
+    quality_check = PythonOperator(
+        task_id="check_bigquery_quality",
+        python_callable=check_bigquery_quality,
+    )
+
     (
         extract_data
         >> validate_data
         >> transform_data
         >> load_bigquery_task
         >> verify_data
+        >> quality_check
     )
 PY
